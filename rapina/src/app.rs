@@ -82,6 +82,10 @@ pub struct Rapina {
     /// Requires the `swagger-ui` feature and OpenAPI to be enabled.
     #[cfg(feature = "swagger-ui")]
     pub(crate) swagger_ui_path: Option<String>,
+    /// Path where the MCP HTTP endpoint is served (`None` = disabled).
+    /// Requires the `mcp` feature.
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_path: Option<String>,
     /// Authentication configuration (if enabled)
     pub(crate) auth_config: Option<AuthConfig>,
     /// Public routes registry
@@ -149,6 +153,8 @@ impl Rapina {
             openapi_version: "1.0.0".to_string(),
             #[cfg(feature = "swagger-ui")]
             swagger_ui_path: None,
+            #[cfg(feature = "mcp")]
+            mcp_path: None,
             auth_config: None,
             public_routes: PublicRoutes::new(),
             auto_discover: false,
@@ -864,6 +870,92 @@ impl Rapina {
         self
     }
 
+    /// Enables the MCP HTTP endpoint at the default path (`/__rapina/mcp`).
+    ///
+    /// When enabled, a `POST /__rapina/mcp` endpoint is registered that
+    /// implements the MCP JSON-RPC 2.0 protocol over HTTP (Streamable HTTP
+    /// transport). Functions annotated with `#[mcp_tool]` are automatically
+    /// discoverable and callable by AI tools that support MCP.
+    ///
+    /// Requires the `mcp` Cargo feature.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use rapina::prelude::*;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> std::io::Result<()> {
+    ///     Rapina::new()
+    ///         .discover()
+    ///         .mcp()
+    ///         .listen("127.0.0.1:3000")
+    ///         .await
+    /// }
+    /// ```
+    #[cfg(feature = "mcp")]
+    pub fn mcp(self) -> Self {
+        self.mcp_at("/__rapina/mcp")
+    }
+
+    /// Enables the MCP HTTP endpoint at a custom path.
+    ///
+    /// Requires the `mcp` Cargo feature. See [`mcp`](Self::mcp) for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use rapina::prelude::*;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> std::io::Result<()> {
+    ///     Rapina::new()
+    ///         .discover()
+    ///         .mcp_at("/api/mcp")
+    ///         .listen("127.0.0.1:3000")
+    ///         .await
+    /// }
+    /// ```
+    #[cfg(feature = "mcp")]
+    pub fn mcp_at(mut self, path: impl Into<String>) -> Self {
+        self.mcp_path = Some(path.into());
+        self
+    }
+
+    /// Run this application as an MCP stdio server instead of an HTTP server.
+    ///
+    /// Reads newline-delimited JSON-RPC 2.0 requests from stdin and writes
+    /// responses to stdout. Returns when stdin is closed (EOF).
+    ///
+    /// All `#[mcp_tool]` functions discovered via `inventory` are available as
+    /// MCP tools. Use this as the entry point when configuring rapina as a
+    /// subprocess MCP server in an AI tool's settings (e.g. Claude's
+    /// `mcp_servers` configuration).
+    ///
+    /// Requires both the `mcp` and `mcp-stdio` Cargo features.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rapina::prelude::*;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> std::io::Result<()> {
+    ///     Rapina::new()
+    ///         .discover()
+    ///         .serve_mcp_stdio()
+    ///         .await
+    /// }
+    /// ```
+    #[cfg(feature = "mcp-stdio")]
+    pub async fn serve_mcp_stdio(self) -> std::io::Result<()> {
+        let _ = crate::observability::init_subscriber(self.tracing_config.clone(), None);
+        let app = self.prepare();
+        let registry = crate::mcp::McpRegistry::from_inventory();
+        let state = std::sync::Arc::new(app.state.clone());
+        crate::mcp::stdio::serve(&registry, state).await
+    }
+
     /// Enables response caching with the given configuration.
     ///
     /// Caches GET responses that use `#[cache(ttl = N)]` and auto-invalidates
@@ -1161,6 +1253,25 @@ impl Rapina {
             self.router = self
                 .router
                 .get_named(&ui_path_owned, "swagger_ui", crate::openapi::swagger_ui_handler);
+        }
+
+        #[cfg(feature = "mcp")]
+        if let Some(ref mcp_path) = self.mcp_path {
+            let registry = crate::mcp::McpRegistry::from_inventory();
+            if registry.tools.is_empty() {
+                tracing::warn!(
+                    "MCP endpoint enabled at '{}' but no #[mcp_tool] functions were found. \
+                     Did you forget to call .discover() or annotate functions with #[mcp_tool]?",
+                    mcp_path
+                );
+            }
+            self.state = self.state.with(registry);
+            let mcp_path_owned = mcp_path.clone();
+            self.router = self.router.post_named(
+                &mcp_path_owned,
+                "mcp_http",
+                crate::mcp::mcp_http_handler,
+            );
         }
 
         // Sort routes so static segments take priority over parameterized ones.

@@ -9,6 +9,50 @@ Routine dependency-only updates are intentionally omitted unless they change use
 
 ## [Unreleased]
 
+### Added
+- **MCP (Model Context Protocol) server** (`mcp` feature): Expose your application to AI coding tools as an MCP server. Enable the HTTP transport endpoint with `.mcp()` on the app builder (default path `/__rapina/mcp`), or use a custom path with `.mcp_at("/your/path")`. The endpoint implements the MCP JSON-RPC 2.0 Streamable HTTP transport (protocol version `2024-11-05`) supporting `initialize`, `ping`, `tools/list`, and `tools/call` methods.
+
+- **`#[mcp_tool]` attribute macro** (`mcp` feature): Annotate async functions to expose them as MCP tools auto-discovered at startup via `inventory`. The macro accepts:
+  - `name = "tool_name"` — stable tool name (default: function name)
+  - `description = "..."` — human-readable description shown to the AI model
+  - `risk = "read" | "write" | "destructive"` — risk level (default: `"read"`)
+  - `confirmation = "never" | "required"` — whether the AI must confirm before calling (default: `"never"`)
+  - `idempotent = true | false` — whether repeated calls are safe (default: `false`)
+
+  The first function argument (if not a `State<T>` extractor) is the **input type** and must implement `serde::Deserialize` and `schemars::JsonSchema`. Its JSON Schema is exposed in `tools/list`. Remaining arguments are DI extractors resolved from `AppState`. The return type must implement `serde::Serialize`; `Result<T, E>` return types are unwrapped automatically.
+
+  ```rust
+  #[derive(Deserialize, JsonSchema)]
+  pub struct SearchParams { pub query: String }
+
+  #[mcp_tool(
+      name = "search_users",
+      description = "Search for users by name",
+      risk = "read",
+      idempotent = true,
+  )]
+  async fn search_users(params: SearchParams, db: State<Db>) -> Vec<User> {
+      db.search(&params.query).await
+  }
+
+  // In main:
+  Rapina::new()
+      .discover()
+      .mcp()
+      .listen("127.0.0.1:3000")
+      .await
+  ```
+
+- **MCP stdio transport** (`mcp-stdio` feature): Call `app.serve_mcp_stdio().await` instead of `app.listen()` to run rapina as a newline-delimited JSON-RPC stdio server — suitable for configuring as a subprocess in AI tool MCP settings (e.g. Claude Code's `mcp_servers`).
+
+  ```rust
+  // In main (stdio mode):
+  Rapina::new()
+      .discover()
+      .serve_mcp_stdio()
+      .await
+  ```
+
 ## [0.13.1] - 2026-08-04
 
 ### Fixed

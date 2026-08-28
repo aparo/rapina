@@ -2652,3 +2652,504 @@ mod tests {
         assert!(!output.contains("fn deprecated"));
     }
 }
+
+// ─── #[mcp_tool] ─────────────────────────────────────────────────────────────
+
+/// Expose an async function as an MCP (Model Context Protocol) tool.
+///
+/// Annotated functions are collected via `inventory` and served by the MCP
+/// HTTP endpoint (`/__rapina/mcp`) or via stdio when the respective feature is
+/// enabled and configured on the app builder.
+///
+/// # Parameters
+///
+/// | Parameter | Type | Default | Description |
+/// |---|---|---|---|
+/// | `name` | `"string"` | function name | Stable tool name used by MCP clients |
+/// | `description` | `"string"` | `""` | Human-readable description shown to the AI |
+/// | `risk` | `"read"` \| `"write"` \| `"destructive"` | `"read"` | Risk level (MCP annotation) |
+/// | `confirmation` | `"never"` \| `"required"` | `"never"` | Whether the AI must confirm before calling |
+/// | `idempotent` | `true` \| `false` | `false` | Whether repeated calls with same args are safe |
+///
+/// # Function signature
+///
+/// The function must be `async`. If it accepts arguments, the **first**
+/// argument is the input struct (must implement `serde::Deserialize` and
+/// `schemars::JsonSchema`). All remaining arguments are DI extractors
+/// resolved from `AppState` (e.g. `State<MyService>`).
+///
+/// The return type must implement `serde::Serialize`. If the return type is
+/// named `Result`, both the success value (must be `Serialize`) and the
+/// error (must be `Display`) are handled: errors are returned as a JSON
+/// object `{"error": "...message..."}`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rapina::prelude::*;
+/// use rapina::mcp_tool;
+///
+/// #[derive(serde::Deserialize, schemars::JsonSchema)]
+/// pub struct SearchParams {
+///     pub query: String,
+///     pub limit: Option<u32>,
+/// }
+///
+/// #[mcp_tool(
+///     name = "search_users",
+///     description = "Search for users by name",
+///     risk = "read",
+///     idempotent = true,
+/// )]
+/// async fn search_users(params: SearchParams, db: State<Db>) -> Vec<UserSummary> {
+///     db.search_users(&params.query, params.limit.unwrap_or(10)).await
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
+    mcp_tool_impl(attr.into(), item.into()).into()
+}
+
+struct McpToolAttr {
+    name: Option<String>,
+    description: String,
+    risk: String,
+    confirmation: String,
+    idempotent: bool,
+}
+
+impl Default for McpToolAttr {
+    fn default() -> Self {
+        Self {
+            name: None,
+            description: String::new(),
+            risk: "read".to_string(),
+            confirmation: "never".to_string(),
+            idempotent: false,
+        }
+    }
+}
+
+impl syn::parse::Parse for McpToolAttr {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut attr = McpToolAttr::default();
+
+        while !input.is_empty() {
+            let ident: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+
+            if ident == "name" {
+                let lit: syn::LitStr = input.parse()?;
+                attr.name = Some(lit.value());
+            } else if ident == "description" {
+                let lit: syn::LitStr = input.parse()?;
+                attr.description = lit.value();
+            } else if ident == "risk" {
+                let lit: syn::LitStr = input.parse()?;
+                let val = lit.value();
+                if !matches!(val.as_str(), "read" | "write" | "destructive") {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "risk must be \"read\", \"write\", or \"destructive\"",
+                    ));
+                }
+                attr.risk = val;
+            } else if ident == "confirmation" {
+                let lit: syn::LitStr = input.parse()?;
+                let val = lit.value();
+                if !matches!(val.as_str(), "never" | "required") {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "confirmation must be \"never\" or \"required\"",
+                    ));
+                }
+                attr.confirmation = val;
+            } else if ident == "idempotent" {
+                let lit: syn::LitBool = input.parse()?;
+                attr.idempotent = lit.value();
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "unknown #[mcp_tool] attribute `{ident}` — supported: `name`, `description`, `risk`, `confirmation`, `idempotent`"
+                    ),
+                ));
+            }
+
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+
+        Ok(attr)
+    }
+}
+
+/// Returns `true` when the last path segment of a return type is named "Result".
+fn return_type_is_result(ret: &syn::ReturnType) -> bool {
+    if let syn::ReturnType::Type(_, ty) = ret {
+        if let syn::Type::Path(tp) = ty.as_ref() {
+            if let Some(seg) = tp.path.segments.last() {
+                return seg.ident == "Result";
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when the first FnArg looks like a DI extractor (State<T>, Db, etc.)
+/// rather than an input payload type.
+fn arg_is_di_extractor(arg: &syn::FnArg) -> bool {
+    if let syn::FnArg::Typed(pt) = arg {
+        if let syn::Type::Path(tp) = pt.ty.as_ref() {
+            if let Some(seg) = tp.path.segments.first() {
+                let name = seg.ident.to_string();
+                // Known DI extractor types: any type whose name starts with "State"
+                // or is a well-known shorthand like "Db".
+                return name == "State" || name == "Db";
+            }
+        }
+    }
+    false
+}
+
+fn mcp_tool_impl(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let mcp_attr: McpToolAttr = match syn::parse2(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    let func: syn::ItemFn = match syn::parse2(item) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    if func.sig.asyncness.is_none() {
+        return syn::Error::new(
+            func.sig.fn_token.span,
+            "#[mcp_tool] must be applied to an async function",
+        )
+        .to_compile_error();
+    }
+
+    if !func.sig.generics.params.is_empty() {
+        return syn::Error::new(
+            func.sig.generics.params.first().unwrap().span(),
+            "#[mcp_tool] does not support generic type parameters",
+        )
+        .to_compile_error();
+    }
+
+    let func_name = &func.sig.ident;
+    let func_name_str = func_name.to_string();
+    let func_vis = &func.vis;
+    let func_attrs = &func.attrs;
+    let func_block = &func.block;
+    let impl_inputs = &func.sig.inputs;
+    let impl_output = &func.sig.output;
+
+    let tool_name_str = mcp_attr.name.unwrap_or_else(|| func_name_str.clone());
+    let description_str = &mcp_attr.description;
+    let idempotent = mcp_attr.idempotent;
+
+    let risk_tokens = match mcp_attr.risk.as_str() {
+        "write" => quote! { rapina::mcp::ToolRisk::Write },
+        "destructive" => quote! { rapina::mcp::ToolRisk::Destructive },
+        _ => quote! { rapina::mcp::ToolRisk::Read },
+    };
+
+    let confirmation_tokens = match mcp_attr.confirmation.as_str() {
+        "required" => quote! { rapina::mcp::ToolConfirmation::Required },
+        _ => quote! { rapina::mcp::ToolConfirmation::Never },
+    };
+
+    let impl_fn_name = syn::Ident::new(
+        &format!("__rapina_mcp_impl_{}", func_name_str),
+        proc_macro2::Span::call_site(),
+    );
+    let handle_fn_name = syn::Ident::new(
+        &format!("__rapina_mcp_handle_{}", func_name_str),
+        proc_macro2::Span::call_site(),
+    );
+    let schema_fn_name = syn::Ident::new(
+        &format!("__rapina_mcp_schema_{}", func_name_str),
+        proc_macro2::Span::call_site(),
+    );
+
+    let args: Vec<_> = func.sig.inputs.iter().collect();
+
+    // Determine which args are input vs DI:
+    // - If 0 args: no input, no DI.
+    // - If first arg looks like a DI extractor: all args are DI, no input type.
+    // - Otherwise: first arg is input type, remaining are DI.
+    let (has_input, input_type, di_args) = if args.is_empty() {
+        (false, None, vec![])
+    } else if arg_is_di_extractor(args[0]) {
+        (false, None, args.clone())
+    } else {
+        let input_ty = match &args[0] {
+            syn::FnArg::Typed(pt) => Some(&pt.ty),
+            syn::FnArg::Receiver(r) => {
+                return syn::Error::new(
+                    r.self_token.span,
+                    "#[mcp_tool] cannot be applied to a method — use a free function",
+                )
+                .to_compile_error();
+            }
+        };
+        (true, input_ty, args[1..].to_vec())
+    };
+
+    // Build DI extraction code for remaining args.
+    let mut extractor_extractions = Vec::new();
+    let mut di_call_args = Vec::new();
+
+    for (i, arg) in di_args.iter().enumerate() {
+        if let syn::FnArg::Typed(pat_type) = arg {
+            let arg_type = &pat_type.ty;
+            let tmp = syn::Ident::new(
+                &format!("__rapina_mcp_di_{}", i),
+                proc_macro2::Span::call_site(),
+            );
+            extractor_extractions.push(quote! {
+                let #tmp = match <#arg_type as rapina::extract::FromRequestParts>::from_request_parts(
+                    &__rapina_parts, &__rapina_params, &__rapina_state
+                ).await {
+                    Ok(v) => v,
+                    Err(e) => return rapina::serde_json::json!({
+                        "error": format!("dependency injection failed: {}", e)
+                    }),
+                };
+            });
+            di_call_args.push(quote! { #tmp });
+        }
+    }
+
+    // Build the deserialization code for the input arg (if present).
+    let input_deser = if has_input {
+        let ty = input_type.unwrap();
+        quote! {
+            let __rapina_mcp_input: #ty = match rapina::serde_json::from_value(__rapina_mcp_args) {
+                Ok(v) => v,
+                Err(e) => return rapina::serde_json::json!({
+                    "error": format!("invalid arguments: {}", e)
+                }),
+            };
+        }
+    } else {
+        quote! {}
+    };
+
+    // Build the call args list (input arg first if present, then DI).
+    let call_input = if has_input {
+        quote! { __rapina_mcp_input, }
+    } else {
+        quote! {}
+    };
+
+    // Build the result serialization code.
+    // If return type is Result, unwrap Ok/Err separately for cleaner output.
+    let result_to_json = if return_type_is_result(impl_output) {
+        quote! {
+            match __rapina_mcp_result {
+                Ok(v) => rapina::serde_json::to_value(v)
+                    .unwrap_or(rapina::serde_json::Value::Null),
+                Err(e) => rapina::serde_json::json!({ "error": e.to_string() }),
+            }
+        }
+    } else {
+        quote! {
+            rapina::serde_json::to_value(__rapina_mcp_result)
+                .unwrap_or(rapina::serde_json::Value::Null)
+        }
+    };
+
+    // Build input schema function.
+    let schema_impl = if has_input {
+        let ty = input_type.unwrap();
+        quote! {
+            fn #schema_fn_name() -> rapina::serde_json::Value {
+                rapina::openapi_schema_for::<#ty>()
+                    .and_then(|s| rapina::serde_json::to_value(s).ok())
+                    .unwrap_or_else(|| rapina::serde_json::json!({"type": "object"}))
+            }
+        }
+    } else {
+        quote! {
+            fn #schema_fn_name() -> rapina::serde_json::Value {
+                rapina::serde_json::json!({"type": "object", "properties": {}})
+            }
+        }
+    };
+
+    quote! {
+        // Original function body, renamed internally. Never called directly by users.
+        #(#func_attrs)*
+        #[doc(hidden)]
+        async fn #impl_fn_name(#impl_inputs) #impl_output
+        #func_block
+
+        // DI wrapper registered in inventory.
+        #[doc(hidden)]
+        fn #handle_fn_name(
+            __rapina_mcp_args: rapina::serde_json::Value,
+            __rapina_state: std::sync::Arc<rapina::state::AppState>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = rapina::serde_json::Value> + Send + 'static>>
+        {
+            Box::pin(async move {
+                #input_deser
+                let (__rapina_parts, _) = rapina::http::Request::new(()).into_parts();
+                let __rapina_params = rapina::extract::PathParams::new();
+                #(#extractor_extractions)*
+                let __rapina_mcp_result = #impl_fn_name(#call_input #(#di_call_args),*).await;
+                #result_to_json
+            })
+        }
+
+        // Input schema function.
+        #[doc(hidden)]
+        #schema_impl
+
+        // Public re-export with the original name (as a no-op unit struct for discovery).
+        // This keeps the user-visible name in scope for IDE completion.
+        #func_vis use #impl_fn_name as #func_name;
+
+        rapina::inventory::submit! {
+            rapina::mcp::McpToolDescriptor {
+                name: #tool_name_str,
+                description: #description_str,
+                risk: #risk_tokens,
+                confirmation: #confirmation_tokens,
+                idempotent: #idempotent,
+                input_schema: #schema_fn_name,
+                handle: #handle_fn_name,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mcp_tool_tests {
+    use super::*;
+
+    #[test]
+    fn test_mcp_tool_basic_generates_descriptor() {
+        let attr = quote::quote! { description = "A test tool" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("McpToolDescriptor"));
+        assert!(output.contains("\"my_tool\""));
+        assert!(output.contains("A test tool"));
+    }
+
+    #[test]
+    fn test_mcp_tool_custom_name() {
+        let attr = quote::quote! { name = "custom_name", description = "desc" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("\"custom_name\""));
+    }
+
+    #[test]
+    fn test_mcp_tool_risk_write() {
+        let attr = quote::quote! { description = "d", risk = "write" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("ToolRisk :: Write"));
+    }
+
+    #[test]
+    fn test_mcp_tool_confirmation_required() {
+        let attr = quote::quote! { description = "d", confirmation = "required" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("ToolConfirmation :: Required"));
+    }
+
+    #[test]
+    fn test_mcp_tool_idempotent_true() {
+        let attr = quote::quote! { description = "d", idempotent = true };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("idempotent : true"));
+    }
+
+    #[test]
+    fn test_mcp_tool_with_input_type() {
+        let attr = quote::quote! { description = "search" };
+        let item = quote::quote! {
+            async fn search_tool(params: SearchParams) -> Vec<String> { vec![] }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("SearchParams"));
+        assert!(output.contains("from_value"));
+        assert!(output.contains("openapi_schema_for"));
+    }
+
+    #[test]
+    fn test_mcp_tool_di_only_no_input_deser() {
+        let attr = quote::quote! { description = "list" };
+        let item = quote::quote! {
+            async fn list_tool(db: State<Db>) -> Vec<String> { vec![] }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        // No from_value call since there's no input type
+        assert!(!output.contains("from_value"));
+        // But State<Db> should be extracted via FromRequestParts
+        assert!(output.contains("from_request_parts"));
+    }
+
+    #[test]
+    fn test_mcp_tool_result_return_uses_ok_err_match() {
+        let attr = quote::quote! { description = "fallible" };
+        let item = quote::quote! {
+            async fn fallible_tool() -> Result<String, MyError> { Ok("ok".into()) }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        // Result-returning functions should use match Ok/Err pattern
+        assert!(output.contains("to_string"));
+    }
+
+    #[test]
+    fn test_mcp_tool_invalid_risk_is_compile_error() {
+        let attr = quote::quote! { risk = "unknown" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("compile_error"));
+    }
+
+    #[test]
+    fn test_mcp_tool_unknown_attr_is_compile_error() {
+        let attr = quote::quote! { foo = "bar" };
+        let item = quote::quote! {
+            async fn my_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("compile_error"));
+    }
+
+    #[test]
+    fn test_mcp_tool_non_async_is_compile_error() {
+        let attr = quote::quote! { description = "sync" };
+        let item = quote::quote! {
+            fn sync_tool() -> &'static str { "hello" }
+        };
+        let output = mcp_tool_impl(attr, item).to_string();
+        assert!(output.contains("compile_error"));
+    }
+}

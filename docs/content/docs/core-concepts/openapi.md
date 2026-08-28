@@ -400,3 +400,8 @@ The command exits non-zero only if there are breaking changes. Non-breaking chan
 | Added endpoint | Non-breaking |
 | Added HTTP method to endpoint | Non-breaking |
 | Added response field | Non-breaking |
+
+## Related
+
+- **[MCP Server](/docs/core-concepts/mcp/)** — expose your rapina application as an MCP server so AI tools can call your endpoints directly as structured functions.
+- **[llms.txt](/docs/core-concepts/llms-txt/)** — serve a machine-readable route summary for AI agent discovery.

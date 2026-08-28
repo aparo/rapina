@@ -139,3 +139,9 @@ rapina llms export -o llms.txt
 ```
 
 See [rapina llms export](/docs/cli/commands/#rapina-llms-export) for the full option reference.
+
+---
+
+## Related
+
+- **[MCP Server](/docs/core-concepts/mcp/)** — instead of passively documenting your API for AI tools, expose it as an active MCP server so tools can call your endpoints directly.

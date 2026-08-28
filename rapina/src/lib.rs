@@ -115,6 +115,8 @@ pub mod observability;
 pub mod openapi;
 #[cfg(feature = "database")]
 pub mod pagination;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 #[cfg(feature = "websocket")]
 pub mod relay;
 pub mod response;
@@ -183,6 +185,11 @@ pub mod prelude {
 
     #[cfg(feature = "metrics")]
     pub use rapina_macros::metric;
+
+    #[cfg(feature = "mcp")]
+    pub use rapina_macros::mcp_tool;
+    #[cfg(feature = "mcp")]
+    pub use crate::mcp::{McpToolDescriptor, ToolConfirmation, ToolRisk};
 }
 
 // Re-export proc macros at crate root so they work as rapina::schema!, rapina::get!, etc.
@@ -192,6 +199,10 @@ pub use rapina_macros::{Config, delete, get, job, patch, post, public, put, rela
 // attribute `metric`" instead of a path error inside the expansion.
 #[cfg(feature = "metrics")]
 pub use rapina_macros::metric;
+
+// MCP tool annotation macro — gated on the `mcp` feature.
+#[cfg(feature = "mcp")]
+pub use rapina_macros::mcp_tool;
 
 // Re-export dependencies so users don't need to add them to their Cargo.toml
 pub use http;
