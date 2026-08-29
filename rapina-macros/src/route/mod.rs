@@ -14,11 +14,21 @@ use metadata::{
 };
 
 /// Parsed route macro attribute: `"/path"`, `"/path", group = "/prefix"`,
-/// `"/path", description = "..."`, or any combination thereof.
+/// `"/path", description = "..."`, `"/path", id = "op.id"`,
+/// `"/path", summary = "Short description"`, `"/path", tags = ["tag1", "tag2"]`,
+/// `"/path", deprecated = true`, or any combination thereof.
 struct RouteAttr {
     path: LitStr,
     group: Option<LitStr>,
     description: Option<LitStr>,
+    /// Stable OpenAPI operationId override (e.g. "users.create").
+    id: Option<LitStr>,
+    /// Short one-line summary for OpenAPI (overrides the auto-generated humanized name).
+    summary: Option<LitStr>,
+    /// OpenAPI tags for grouping operations (e.g. `["users", "admin"]`).
+    tags: Vec<LitStr>,
+    /// Mark this operation as deprecated in the OpenAPI spec.
+    deprecated: bool,
 }
 
 impl syn::parse::Parse for RouteAttr {
@@ -26,6 +36,10 @@ impl syn::parse::Parse for RouteAttr {
         let path: LitStr = input.parse()?;
         let mut group: Option<LitStr> = None;
         let mut description: Option<LitStr> = None;
+        let mut id: Option<LitStr> = None;
+        let mut summary: Option<LitStr> = None;
+        let mut tags: Vec<LitStr> = Vec::new();
+        let mut deprecated = false;
 
         while input.peek(syn::Token![,]) {
             input.parse::<syn::Token![,]>()?;
@@ -40,10 +54,29 @@ impl syn::parse::Parse for RouteAttr {
             } else if ident == "description" {
                 let value: LitStr = input.parse()?;
                 description = Some(value);
+            } else if ident == "id" {
+                let value: LitStr = input.parse()?;
+                id = Some(value);
+            } else if ident == "summary" {
+                let value: LitStr = input.parse()?;
+                summary = Some(value);
+            } else if ident == "tags" {
+                let content;
+                syn::bracketed!(content in input);
+                while !content.is_empty() {
+                    let s: LitStr = content.parse()?;
+                    tags.push(s);
+                    if content.peek(syn::Token![,]) {
+                        content.parse::<syn::Token![,]>()?;
+                    }
+                }
+            } else if ident == "deprecated" {
+                let value: syn::LitBool = input.parse()?;
+                deprecated = value.value();
             } else {
                 return Err(syn::Error::new(
                     ident.span(),
-                    "expected `group` or `description`",
+                    "expected `group`, `description`, `id`, `summary`, `tags`, or `deprecated`",
                 ));
             }
         }
@@ -55,6 +88,10 @@ impl syn::parse::Parse for RouteAttr {
             path,
             group,
             description,
+            id,
+            summary,
+            tags,
+            deprecated,
         })
     }
 }
@@ -111,6 +148,11 @@ fn route_macro_core(
         .as_ref()
         .map(|l| l.value())
         .or_else(|| extract_doc_description(&func.attrs));
+
+    let operation_id_value: Option<String> = route_attr.id.as_ref().map(|l| l.value());
+    let summary_value: Option<String> = route_attr.summary.as_ref().map(|l| l.value());
+    let tags_values: Vec<String> = route_attr.tags.iter().map(|l| l.value()).collect();
+    let deprecated_value = route_attr.deprecated;
 
     // Extract #[errors(ErrorType)] attribute if present
     let error_type = extract_errors_attr(&mut func.attrs);
@@ -211,6 +253,50 @@ fn route_macro_core(
         quote! {
             fn description() -> Option<&'static str> {
                 Some(#desc)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Build operation_id() impl — only when an explicit `id` was given
+    let operation_id_impl = if let Some(ref op_id) = operation_id_value {
+        quote! {
+            fn operation_id() -> Option<&'static str> {
+                Some(#op_id)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Build summary() impl — only when an explicit `summary` was given
+    let summary_impl = if let Some(ref s) = summary_value {
+        quote! {
+            fn summary() -> Option<&'static str> {
+                Some(#s)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Build tags() impl — only when tags were specified
+    let tags_impl = if !tags_values.is_empty() {
+        quote! {
+            fn tags() -> &'static [&'static str] {
+                &[#(#tags_values),*]
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Build deprecated() impl — only when deprecated = true
+    let deprecated_impl = if deprecated_value {
+        quote! {
+            fn deprecated() -> bool {
+                true
             }
         }
     } else {
@@ -423,6 +509,10 @@ fn route_macro_core(
             #error_responses_impl
             #header_parameters_impl
             #description_impl
+            #operation_id_impl
+            #summary_impl
+            #tags_impl
+            #deprecated_impl
 
             fn call(
                 &self,
@@ -1175,5 +1265,85 @@ mod tests {
     fn test_join_paths_empty_prefix() {
         assert_eq!(join_paths("", "/users"), "/users");
         assert_eq!(join_paths("", ""), "/");
+    }
+
+    // -- OpenAPI macro attributes --
+
+    #[test]
+    fn test_id_attr_generates_operation_id_impl() {
+        let path = quote!("/users", id = "users.list");
+        let input = quote! {
+            async fn list_users() -> &'static str { "users" }
+        };
+        let output = route_macro_core("GET", path, input).to_string();
+        assert!(output.contains("fn operation_id"));
+        assert!(output.contains("\"users.list\""));
+    }
+
+    #[test]
+    fn test_summary_attr_generates_summary_impl() {
+        let path = quote!("/users", summary = "List all users");
+        let input = quote! {
+            async fn list_users() -> &'static str { "users" }
+        };
+        let output = route_macro_core("GET", path, input).to_string();
+        assert!(output.contains("fn summary"));
+        assert!(output.contains("\"List all users\""));
+    }
+
+    #[test]
+    fn test_tags_attr_generates_tags_impl() {
+        let path = quote!("/users", tags = ["users", "admin"]);
+        let input = quote! {
+            async fn list_users() -> &'static str { "users" }
+        };
+        let output = route_macro_core("GET", path, input).to_string();
+        assert!(output.contains("fn tags"));
+        assert!(output.contains("\"users\""));
+        assert!(output.contains("\"admin\""));
+    }
+
+    #[test]
+    fn test_deprecated_attr_generates_deprecated_impl() {
+        let path = quote!("/old-endpoint", deprecated = true);
+        let input = quote! {
+            async fn old_handler() -> &'static str { "old" }
+        };
+        let output = route_macro_core("GET", path, input).to_string();
+        assert!(output.contains("fn deprecated"));
+        assert!(output.contains("true"));
+    }
+
+    #[test]
+    fn test_all_new_attrs_combined() {
+        let path = quote!(
+            "/users",
+            id = "users.create",
+            summary = "Create a user",
+            tags = ["users"],
+            deprecated = false
+        );
+        let input = quote! {
+            async fn create_user() -> &'static str { "created" }
+        };
+        let output = route_macro_core("POST", path, input).to_string();
+        assert!(output.contains("\"users.create\""));
+        assert!(output.contains("\"Create a user\""));
+        assert!(output.contains("\"users\""));
+        // deprecated = false should NOT emit the deprecated() method
+        assert!(!output.contains("fn deprecated"));
+    }
+
+    #[test]
+    fn test_no_new_attrs_no_optional_impls() {
+        let path = quote!("/users");
+        let input = quote! {
+            async fn list_users() -> &'static str { "users" }
+        };
+        let output = route_macro_core("GET", path, input).to_string();
+        assert!(!output.contains("fn operation_id"));
+        assert!(!output.contains("fn summary"));
+        assert!(!output.contains("fn tags"));
+        assert!(!output.contains("fn deprecated"));
     }
 }
