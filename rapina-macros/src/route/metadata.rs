@@ -98,8 +98,9 @@ fn extract_body_inner_type(ty: &syn::Type) -> Option<RequestBodyMeta> {
     None
 }
 
-/// Extract the first non-empty line from `///` doc comments on a function.
+/// Extract all non-empty `///` doc comment lines on a function, joined with `\n`.
 pub(crate) fn extract_doc_description(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut lines = Vec::new();
     for attr in attrs {
         if !attr.path().is_ident("doc") {
             continue;
@@ -110,15 +111,19 @@ pub(crate) fn extract_doc_description(attrs: &[syn::Attribute]) -> Option<String
                 ..
             }) = &nv.value
             {
-                let line = s.value();
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+                lines.push(s.value().trim().to_string());
             }
         }
     }
-    None
+    // Drop trailing blank lines
+    while lines.last().map(|l: &String| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 /// Extract #[errors(ErrorType)] attribute from function attributes, removing it if found.

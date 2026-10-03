@@ -7,7 +7,11 @@ use std::collections::BTreeMap;
 pub struct OpenApiSpec {
     pub openapi: String,
     pub info: Info,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<Server>,
     pub paths: BTreeMap<String, PathItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<BTreeMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Components>,
 }
@@ -20,10 +24,189 @@ impl OpenApiSpec {
                 title: title.into(),
                 version: version.into(),
                 description: None,
+                terms_of_service: None,
+                contact: None,
+                license: None,
             },
+            servers: Vec::new(),
             paths: BTreeMap::new(),
+            security: Vec::new(),
             components: None,
         }
+    }
+
+    /// Add a server entry to the spec.
+    pub fn with_server(
+        mut self,
+        url: impl Into<String>,
+        description: Option<impl Into<String>>,
+    ) -> Self {
+        self.servers.push(Server {
+            url: url.into(),
+            description: description.map(Into::into),
+        });
+        self
+    }
+
+    /// Set a global security requirement (references a named security scheme).
+    pub fn with_security(mut self, scheme_name: impl Into<String>) -> Self {
+        let mut req = BTreeMap::new();
+        req.insert(scheme_name.into(), Vec::new());
+        self.security.push(req);
+        self
+    }
+
+    /// Add a named security scheme to `components.securitySchemes`.
+    pub fn with_security_scheme(
+        mut self,
+        name: impl Into<String>,
+        scheme: SecurityScheme,
+    ) -> Self {
+        let components = self.components.get_or_insert_with(Components::default);
+        components.security_schemes.insert(name.into(), scheme);
+        self
+    }
+}
+
+/// API contact information
+#[derive(Debug, Clone, Serialize)]
+pub struct Contact {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl Contact {
+    pub fn new() -> Self {
+        Self { name: None, url: None, email: None }
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    pub fn email(mut self, email: impl Into<String>) -> Self {
+        self.email = Some(email.into());
+        self
+    }
+}
+
+impl Default for Contact {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// API license information
+#[derive(Debug, Clone, Serialize)]
+pub struct License {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+}
+
+impl License {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), url: None, identifier: None }
+    }
+
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    pub fn identifier(mut self, identifier: impl Into<String>) -> Self {
+        self.identifier = Some(identifier.into());
+        self
+    }
+}
+
+/// A server entry in the OpenAPI spec
+#[derive(Debug, Clone, Serialize)]
+pub struct Server {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// An authentication security scheme
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityScheme {
+    #[serde(rename = "type")]
+    pub scheme_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// For `apiKey`: parameter name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// For `apiKey`: "query" | "header" | "cookie"
+    #[serde(rename = "in", skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// For `http`: "bearer" | "basic"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// For `http` bearer: token format hint (e.g. "JWT")
+    #[serde(rename = "bearerFormat", skip_serializing_if = "Option::is_none")]
+    pub bearer_format: Option<String>,
+    /// For `openIdConnect`: discovery URL
+    #[serde(rename = "openIdConnectUrl", skip_serializing_if = "Option::is_none")]
+    pub open_id_connect_url: Option<String>,
+}
+
+impl SecurityScheme {
+    /// HTTP Bearer token scheme (e.g. JWT).
+    pub fn http_bearer(bearer_format: Option<impl Into<String>>) -> Self {
+        Self {
+            scheme_type: "http".to_string(),
+            description: None,
+            name: None,
+            location: None,
+            scheme: Some("bearer".to_string()),
+            bearer_format: bearer_format.map(Into::into),
+            open_id_connect_url: None,
+        }
+    }
+
+    /// API key in a header, query param, or cookie.
+    pub fn api_key(name: impl Into<String>, location: impl Into<String>) -> Self {
+        Self {
+            scheme_type: "apiKey".to_string(),
+            description: None,
+            name: Some(name.into()),
+            location: Some(location.into()),
+            scheme: None,
+            bearer_format: None,
+            open_id_connect_url: None,
+        }
+    }
+
+    /// OpenID Connect discovery URL.
+    pub fn open_id_connect(url: impl Into<String>) -> Self {
+        Self {
+            scheme_type: "openIdConnect".to_string(),
+            description: None,
+            name: None,
+            location: None,
+            scheme: None,
+            bearer_format: None,
+            open_id_connect_url: Some(url.into()),
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 }
 
@@ -34,6 +217,12 @@ pub struct Info {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "termsOfService", skip_serializing_if = "Option::is_none")]
+    pub terms_of_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact: Option<Contact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<License>,
 }
 
 /// Operations available on a single path
@@ -69,6 +258,9 @@ pub struct Operation {
     #[serde(rename = "requestBody", skip_serializing_if = "Option::is_none")]
     pub request_body: Option<RequestBody>,
     pub responses: BTreeMap<String, Response>,
+    /// Per-operation security override. `Some([])` disables auth for this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
 }
 
 impl Default for Operation {
@@ -90,6 +282,7 @@ impl Default for Operation {
             parameters: Vec::new(),
             request_body: None,
             responses,
+            security: None,
         }
     }
 }
@@ -154,6 +347,8 @@ pub enum Schema {
 pub struct Components {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub schemas: BTreeMap<String, serde_json::Value>,
+    #[serde(rename = "securitySchemes", skip_serializing_if = "BTreeMap::is_empty")]
+    pub security_schemes: BTreeMap<String, SecurityScheme>,
 }
 
 /// Generate a JSON Schema for type `T` using OpenAPI 3.0-compatible settings.
@@ -235,7 +430,7 @@ pub fn build_openapi_spec(
     let mut schemas = BTreeMap::new();
     schemas.insert("ErrorResponse".to_string(), error_response_schema());
 
-    spec.components = Some(Components { schemas });
+    spec.components = Some(Components { schemas, security_schemes: BTreeMap::new() });
 
     let mut seen_operation_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
 

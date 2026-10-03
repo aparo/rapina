@@ -56,6 +56,12 @@ impl syn::parse::Parse for RouteAttr {
                 description = Some(value);
             } else if ident == "id" {
                 let value: LitStr = input.parse()?;
+                if value.value().trim().is_empty() {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "`id` must not be empty or whitespace-only",
+                    ));
+                }
                 id = Some(value);
             } else if ident == "summary" {
                 let value: LitStr = input.parse()?;
@@ -65,6 +71,12 @@ impl syn::parse::Parse for RouteAttr {
                 syn::bracketed!(content in input);
                 while !content.is_empty() {
                     let s: LitStr = content.parse()?;
+                    if s.value().trim().is_empty() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            "tags must not contain empty or whitespace-only strings",
+                        ));
+                    }
                     tags.push(s);
                     if content.peek(syn::Token![,]) {
                         content.parse::<syn::Token![,]>()?;
