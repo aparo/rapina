@@ -47,6 +47,12 @@ impl syn::parse::Parse for RouteAttr {
                 description = Some(value);
             } else if ident == "id" {
                 let value: LitStr = input.parse()?;
+                if value.value().trim().is_empty() {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "`id` must not be empty or whitespace-only",
+                    ));
+                }
                 id = Some(value);
             } else if ident == "summary" {
                 let value: LitStr = input.parse()?;
@@ -56,6 +62,12 @@ impl syn::parse::Parse for RouteAttr {
                 syn::bracketed!(content in input);
                 while !content.is_empty() {
                     let s: LitStr = content.parse()?;
+                    if s.value().trim().is_empty() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            "tags must not contain empty or whitespace-only strings",
+                        ));
+                    }
                     tags.push(s);
                     if content.peek(syn::Token![,]) {
                         content.parse::<syn::Token![,]>()?;
@@ -781,6 +793,7 @@ fn extract_body_inner_type(ty: &syn::Type) -> Option<RequestBodyMeta> {
 
 /// Extract the first non-empty line from `///` doc comments on a function.
 fn extract_doc_description(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut lines = Vec::new();
     for attr in attrs {
         if !attr.path().is_ident("doc") {
             continue;
@@ -791,15 +804,19 @@ fn extract_doc_description(attrs: &[syn::Attribute]) -> Option<String> {
                 ..
             }) = &nv.value
             {
-                let line = s.value();
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+                lines.push(s.value().trim().to_string());
             }
         }
     }
-    None
+    // Drop trailing blank lines
+    while lines.last().map(|l: &String| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 /// Extract #[errors(ErrorType)] attribute from function attributes, removing it if found.

@@ -78,10 +78,16 @@ pub struct Rapina {
     pub(crate) openapi: bool,
     pub(crate) openapi_title: String,
     pub(crate) openapi_version: String,
-    /// Path where Swagger UI is served (`None` = disabled).
+    pub(crate) openapi_contact: Option<crate::openapi::Contact>,
+    pub(crate) openapi_license: Option<crate::openapi::License>,
+    pub(crate) openapi_terms: Option<String>,
+    pub(crate) openapi_servers: Vec<crate::openapi::Server>,
+    pub(crate) openapi_security_schemes: Vec<(String, crate::openapi::SecurityScheme)>,
+    pub(crate) openapi_security: Vec<String>,
+    /// Swagger UI config (`None` = disabled).
     /// Requires the `swagger-ui` feature and OpenAPI to be enabled.
     #[cfg(feature = "swagger-ui")]
-    pub(crate) swagger_ui_path: Option<String>,
+    pub(crate) swagger_ui_config: Option<crate::openapi::SwaggerUiConfig>,
     /// Authentication configuration (if enabled)
     pub(crate) auth_config: Option<AuthConfig>,
     /// Public routes registry
@@ -147,8 +153,14 @@ impl Rapina {
             openapi: false,
             openapi_title: "API".to_string(),
             openapi_version: "1.0.0".to_string(),
+            openapi_contact: None,
+            openapi_license: None,
+            openapi_terms: None,
+            openapi_servers: Vec::new(),
+            openapi_security_schemes: Vec::new(),
+            openapi_security: Vec::new(),
             #[cfg(feature = "swagger-ui")]
-            swagger_ui_path: None,
+            swagger_ui_config: None,
             auth_config: None,
             public_routes: PublicRoutes::new(),
             auto_discover: false,
@@ -814,12 +826,16 @@ impl Rapina {
         self
     }
 
-    /// Enables the Swagger UI at the default path (`/__rapina/swagger/`).
+    /// Enables the Swagger UI at the default path (`/__rapina/swagger`).
     ///
     /// Requires the `swagger-ui` Cargo feature and OpenAPI to be enabled via
     /// [`.openapi()`](Self::openapi). The UI loads the Swagger UI bundle from
     /// a CDN and displays the spec served at `/__rapina/openapi.json`.
     ///
+    /// # Panics
+    ///
+    /// Panics at startup if `.openapi()` was not called before this method.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -829,38 +845,90 @@ impl Rapina {
     /// async fn main() -> std::io::Result<()> {
     ///     Rapina::new()
     ///         .openapi("My API", "1.0.0")
-    ///         .swagger_ui()
+    ///         .enable_swagger_ui()
     ///         .listen("127.0.0.1:3000")
     ///         .await
     /// }
     /// ```
     #[cfg(feature = "swagger-ui")]
-    pub fn swagger_ui(self) -> Self {
-        self.swagger_ui_at("/__rapina/swagger/")
+    pub fn enable_swagger_ui(self) -> Self {
+        self.with_swagger_ui(crate::openapi::SwaggerUiConfig::new("/__rapina/swagger"))
     }
 
-    /// Enables the Swagger UI at a custom path.
+    /// Enables the Swagger UI with custom configuration.
     ///
     /// Requires the `swagger-ui` Cargo feature and OpenAPI to be enabled via
     /// [`.openapi()`](Self::openapi).
     ///
+    /// # Panics
+    ///
+    /// Panics at startup if `.openapi()` was not called before this method.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
     /// use rapina::prelude::*;
+    /// use rapina::openapi::SwaggerUiConfig;
     ///
     /// #[tokio::main]
     /// async fn main() -> std::io::Result<()> {
     ///     Rapina::new()
     ///         .openapi("My API", "1.0.0")
-    ///         .swagger_ui_at("/docs/")
+    ///         .with_swagger_ui(SwaggerUiConfig::new("/docs"))
     ///         .listen("127.0.0.1:3000")
     ///         .await
     /// }
     /// ```
     #[cfg(feature = "swagger-ui")]
-    pub fn swagger_ui_at(mut self, path: impl Into<String>) -> Self {
-        self.swagger_ui_path = Some(path.into());
+    pub fn with_swagger_ui(mut self, config: crate::openapi::SwaggerUiConfig) -> Self {
+        self.swagger_ui_config = Some(config);
+        self
+    }
+
+    /// Sets contact information for the API in the OpenAPI spec.
+    pub fn openapi_contact(mut self, contact: crate::openapi::Contact) -> Self {
+        self.openapi_contact = Some(contact);
+        self
+    }
+
+    /// Sets license information for the API in the OpenAPI spec.
+    pub fn openapi_license(mut self, license: crate::openapi::License) -> Self {
+        self.openapi_license = Some(license);
+        self
+    }
+
+    /// Sets the terms of service URL for the API in the OpenAPI spec.
+    pub fn openapi_terms(mut self, url: impl Into<String>) -> Self {
+        self.openapi_terms = Some(url.into());
+        self
+    }
+
+    /// Adds a server entry to the OpenAPI spec.
+    pub fn openapi_server(
+        mut self,
+        url: impl Into<String>,
+        description: Option<impl Into<String>>,
+    ) -> Self {
+        self.openapi_servers.push(crate::openapi::Server {
+            url: url.into(),
+            description: description.map(Into::into),
+        });
+        self
+    }
+
+    /// Adds a named security scheme to the OpenAPI spec's `components.securitySchemes`.
+    pub fn openapi_security_scheme(
+        mut self,
+        name: impl Into<String>,
+        scheme: crate::openapi::SecurityScheme,
+    ) -> Self {
+        self.openapi_security_schemes.push((name.into(), scheme));
+        self
+    }
+
+    /// Adds a global security requirement referencing a named security scheme.
+    pub fn openapi_security(mut self, scheme_name: impl Into<String>) -> Self {
+        self.openapi_security.push(scheme_name.into());
         self
     }
 
@@ -1137,7 +1205,34 @@ impl Rapina {
 
         if self.openapi {
             let routes = self.router.routes();
-            let spec = build_openapi_spec(&self.openapi_title, &self.openapi_version, &routes);
+            let mut spec =
+                build_openapi_spec(&self.openapi_title, &self.openapi_version, &routes);
+
+            // Apply optional Info extensions
+            if let Some(contact) = self.openapi_contact.take() {
+                spec.info.contact = Some(contact);
+            }
+            if let Some(license) = self.openapi_license.take() {
+                spec.info.license = Some(license);
+            }
+            if let Some(terms) = self.openapi_terms.take() {
+                spec.info.terms_of_service = Some(terms);
+            }
+
+            // Apply servers
+            spec.servers = std::mem::take(&mut self.openapi_servers);
+
+            // Apply security schemes and global security requirements
+            for (name, scheme) in std::mem::take(&mut self.openapi_security_schemes) {
+                let components = spec.components.get_or_insert_with(Default::default);
+                components.security_schemes.insert(name, scheme);
+            }
+            for scheme_name in std::mem::take(&mut self.openapi_security) {
+                let mut req = std::collections::BTreeMap::new();
+                req.insert(scheme_name, Vec::new());
+                spec.security.push(req);
+            }
+
             self.state = self.state.with(OpenApiRegistry::new(spec));
             self.router =
                 self.router
@@ -1145,22 +1240,31 @@ impl Rapina {
         }
 
         #[cfg(feature = "swagger-ui")]
-        if let Some(ref ui_path) = self.swagger_ui_path {
+        if let Some(config) = self.swagger_ui_config.take() {
             if !self.openapi {
-                tracing::warn!(
+                panic!(
                     "Swagger UI is enabled at '{}' but OpenAPI is not configured. \
-                     Call .openapi(title, version) before .swagger_ui() to enable it.",
-                    ui_path
+                     Call .openapi(title, version) before .enable_swagger_ui() or .with_swagger_ui().",
+                    config.path
                 );
             }
-            let spec_url = "/__rapina/openapi.json".to_string();
-            let config =
-                crate::openapi::SwaggerUiConfig::new(ui_path.clone(), spec_url);
+            // Detect route conflicts before registering the Swagger UI route
+            let routes = self.router.routes();
+            let conflict = routes
+                .iter()
+                .any(|r| r.path == config.path && r.method.eq_ignore_ascii_case("GET"));
+            if conflict {
+                panic!(
+                    "Swagger UI path '{}' conflicts with an existing application route. \
+                     Choose a different path for Swagger UI.",
+                    config.path
+                );
+            }
+            let ui_path = config.path.clone();
             self.state = self.state.with(config);
-            let ui_path_owned = ui_path.clone();
             self.router = self
                 .router
-                .get_named(&ui_path_owned, "swagger_ui", crate::openapi::swagger_ui_handler);
+                .get_named(&ui_path, "swagger_ui", crate::openapi::swagger_ui_handler);
         }
 
         // Sort routes so static segments take priority over parameterized ones.
