@@ -1,6 +1,7 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use http::Method;
 use rapina::prelude::*;
+use std::hint::black_box;
 
 /// Resources used to generate realistic REST routes.
 const RESOURCES: &[&str] = &[

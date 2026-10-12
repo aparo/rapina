@@ -67,6 +67,7 @@ impl MigrationTrait for Migration {
                 db.execute_unprepared(&sql).await?;
             }
             sea_orm::DbBackend::Sqlite => {}
+            _ => {}
         }
 
         Ok(())
@@ -90,6 +91,7 @@ impl MigrationTrait for Migration {
             sea_orm::DbBackend::Sqlite => {
                 // no index was created in `up`
             }
+            _ => {}
         }
 
         Ok(())

@@ -173,6 +173,7 @@ fn quote_ident(backend: DatabaseBackend, name: &str) -> String {
         DatabaseBackend::Postgres | DatabaseBackend::Sqlite => {
             format!("\"{}\"", name.replace('"', "\"\""))
         }
+        _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
 
@@ -222,10 +223,11 @@ async fn discover_tables(
              WHERE table_schema = DATABASE() AND table_name NOT LIKE 'seaql_%' \
              ORDER BY table_name"
             .to_string(),
+        _ => return Err("unsupported database backend".to_string()),
     };
 
     let rows = conn
-        .query_all(Statement::from_string(conn.get_database_backend(), sql))
+        .query_all_raw(Statement::from_string(conn.get_database_backend(), sql))
         .await
         .map_err(|e| format!("Failed to discover tables: {}", e))?;
 
@@ -287,7 +289,7 @@ async fn insert_records(
 
         let sea_values: Vec<sea_orm::Value> = values.iter().map(|v| json_to_sea_value(v)).collect();
 
-        conn.execute(Statement::from_sql_and_values(backend, &sql, sea_values))
+        conn.execute_raw(Statement::from_sql_and_values(backend, &sql, sea_values))
             .await
             .map_err(|e| format!("Failed to insert record into '{}': {}", table_name, e))?;
     }
@@ -302,6 +304,7 @@ fn build_placeholders(backend: DatabaseBackend, count: usize) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         DatabaseBackend::Sqlite | DatabaseBackend::MySql => vec!["?"; count].join(", "),
+        _ => vec!["?"; count].join(", "),
     }
 }
 
@@ -326,6 +329,10 @@ fn build_insert_sql(
                 quoted_table, cols, placeholders
             )
         }
+        _ => format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
+            quoted_table, cols, placeholders
+        ),
     }
 }
 
@@ -335,8 +342,9 @@ async fn disable_fk_checks(conn: &impl ConnectionTrait) -> Result<(), String> {
         DatabaseBackend::Sqlite => "PRAGMA foreign_keys = OFF",
         DatabaseBackend::Postgres => "SET session_replication_role = 'replica'",
         DatabaseBackend::MySql => "SET FOREIGN_KEY_CHECKS = 0",
+        _ => return Ok(()),
     };
-    conn.execute(Statement::from_string(backend, sql.to_string()))
+    conn.execute_unprepared(sql)
         .await
         .map_err(|e| format!("Failed to disable foreign key checks: {}", e))?;
     Ok(())
@@ -348,8 +356,9 @@ async fn enable_fk_checks(conn: &impl ConnectionTrait) -> Result<(), String> {
         DatabaseBackend::Sqlite => "PRAGMA foreign_keys = ON",
         DatabaseBackend::Postgres => "SET session_replication_role = 'origin'",
         DatabaseBackend::MySql => "SET FOREIGN_KEY_CHECKS = 1",
+        _ => return Ok(()),
     };
-    conn.execute(Statement::from_string(backend, sql.to_string()))
+    conn.execute_unprepared(sql)
         .await
         .map_err(|e| format!("Failed to re-enable foreign key checks: {}", e))?;
     Ok(())
@@ -365,7 +374,7 @@ async fn truncate_tables(
         let quoted = quote_ident(backend, table_name);
         let sql = format!("DELETE FROM {}", quoted);
 
-        conn.execute(Statement::from_string(backend, sql))
+        conn.execute_unprepared(&sql)
             .await
             .map_err(|e| format!("Failed to truncate table '{}': {}", table_name, e))?;
 
@@ -429,7 +438,7 @@ fn json_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
             }
         }
         serde_json::Value::String(s) => s.clone().into(),
-        _ => sea_orm::Value::String(Some(Box::new(v.to_string()))),
+        _ => sea_orm::Value::String(Some(v.to_string())),
     }
 }
 
@@ -921,7 +930,7 @@ mod integration_tests {
 
     async fn setup_sqlite() -> DatabaseConnection {
         let conn = Database::connect("sqlite::memory:").await.unwrap();
-        conn.execute(Statement::from_string(
+        conn.execute(&Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)".to_string(),
         ))

@@ -110,8 +110,8 @@ impl Postgres {
     }
 
     pub async fn reap_expired(db: &DatabaseConnection) -> Result<(u64, u64), DbErr> {
-        let fail = db.execute(Self::build_fail_expired_stmt()).await?;
-        let reclaim = db.execute(Self::build_reclaim_stmt()).await?;
+        let fail = db.execute_raw(Self::build_fail_expired_stmt()).await?;
+        let reclaim = db.execute_raw(Self::build_reclaim_stmt()).await?;
         Ok((fail.rows_affected(), reclaim.rows_affected()))
     }
 
@@ -138,9 +138,7 @@ impl Postgres {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 
@@ -168,9 +166,7 @@ impl Postgres {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 
@@ -397,8 +393,8 @@ impl Mysql {
     }
 
     pub async fn reap_expired(db: &DatabaseConnection) -> Result<(u64, u64), DbErr> {
-        let fail = db.execute(Self::build_fail_expired_stmt()).await?;
-        let reclaim = db.execute(Self::build_reclaim_stmt()).await?;
+        let fail = db.execute_raw(Self::build_fail_expired_stmt()).await?;
+        let reclaim = db.execute_raw(Self::build_reclaim_stmt()).await?;
         Ok((fail.rows_affected(), reclaim.rows_affected()))
     }
 
@@ -425,9 +421,7 @@ impl Mysql {
         Statement::from_sql_and_values(
             DbBackend::MySql,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 
@@ -455,9 +449,7 @@ impl Mysql {
         Statement::from_sql_and_values(
             DbBackend::MySql,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 
@@ -622,8 +614,8 @@ impl Sqlite {
     }
 
     pub async fn reap_expired(db: &DatabaseConnection) -> Result<(u64, u64), DbErr> {
-        let fail = db.execute(Self::build_fail_expired_stmt()).await?;
-        let reclaim = db.execute(Self::build_reclaim_stmt()).await?;
+        let fail = db.execute_raw(Self::build_fail_expired_stmt()).await?;
+        let reclaim = db.execute_raw(Self::build_reclaim_stmt()).await?;
         Ok((fail.rows_affected(), reclaim.rows_affected()))
     }
 
@@ -652,9 +644,7 @@ impl Sqlite {
         Statement::from_sql_and_values(
             DbBackend::Sqlite,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 
@@ -682,9 +672,7 @@ impl Sqlite {
         Statement::from_sql_and_values(
             DbBackend::Sqlite,
             &sql,
-            [Value::String(Some(Box::new(
-                LEASE_EXPIRED_ERROR.to_owned(),
-            )))],
+            [Value::String(Some(LEASE_EXPIRED_ERROR.to_owned()))],
         )
     }
 

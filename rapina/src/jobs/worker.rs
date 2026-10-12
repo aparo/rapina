@@ -401,6 +401,7 @@ async fn reap_expired(db: &DatabaseConnection) -> Result<(u64, u64), sea_orm::Db
         sea_orm::DbBackend::Postgres => Postgres::reap_expired(db).await,
         sea_orm::DbBackend::MySql => Mysql::reap_expired(db).await,
         sea_orm::DbBackend::Sqlite => Sqlite::reap_expired(db).await,
+        _ => unreachable!("unsupported database backend"),
     }
 }
 

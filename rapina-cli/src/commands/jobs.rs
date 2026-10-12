@@ -86,7 +86,7 @@ pub async fn list(failed: bool) -> Result<(), String> {
     println!("  {} Querying job counts...", "→".cyan());
 
     let rows = conn
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             conn.get_database_backend(),
             "SELECT status, CAST(COUNT(*) AS bigint) AS count \
              FROM rapina_jobs GROUP BY status ORDER BY status"
@@ -141,7 +141,7 @@ pub async fn list(failed: bool) -> Result<(), String> {
 
     if failed {
         let fail_rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "SELECT CAST(id AS text) AS id, queue, job_type, attempts, max_retries, last_error \
                  FROM rapina_jobs WHERE status = 'failed' \
