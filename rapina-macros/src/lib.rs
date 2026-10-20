@@ -882,8 +882,6 @@ fn mcp_tool_impl(
         quote! {
             fn #schema_fn_name() -> rapina::serde_json::Value {
                 rapina::openapi_schema_for::<#ty>()
-                    .and_then(|s| rapina::serde_json::to_value(s).ok())
-                    .unwrap_or_else(|| rapina::serde_json::json!({"type": "object"}))
             }
         }
     } else {
